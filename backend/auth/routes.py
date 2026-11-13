@@ -11,6 +11,11 @@ from config import settings
 from database import DbSession
 from errors import AppError
 
+from fastapi.concurrency import run_in_threadpool  # ← NAYA import
+
+from messaging.publisher import publish_event  # ← NAYA import
+from messaging.topology import USER_REGISTERED
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 RefreshCookie = Annotated[str | None, Cookie(alias=settings.REFRESH_COOKIE_NAME)]
@@ -50,15 +55,31 @@ def _invalid_refresh() -> AppError:
     return AppError(401, "INVALID_REFRESH_TOKEN", "Invalid or expired refresh token")
 
 
-@router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def signup(data: UserCreate, db: DbSession) -> User:
+@router.post(
+    "/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED
+)
+async def signup(data: UserCreate, db: DbSession) -> User:  # ← def → async def
     email_taken = AppError(409, "EMAIL_TAKEN", "Email already registered")
-    if service.get_user_by_email(db, data.email):
+
+    if await run_in_threadpool(
+        service.get_user_by_email, db, data.email
+    ):  # ← threadpool
         raise email_taken
+
     try:
-        return service.create_user(db, data)
+        user = await run_in_threadpool(service.create_user, db, data)  # ← threadpool
     except service.EmailTakenError:
         raise email_taken from None
+
+    await publish_event(
+        USER_REGISTERED,
+        {  # ← NAYA
+            "user_id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+        },
+    )
+    return user
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -75,7 +96,9 @@ def me(current_user: CurrentUser) -> User:
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(response: Response, db: DbSession, refresh_token: RefreshCookie = None) -> TokenResponse:
+def refresh(
+    response: Response, db: DbSession, refresh_token: RefreshCookie = None
+) -> TokenResponse:
     if refresh_token is None or decode_token(refresh_token, "refresh") is None:
         _clear_refresh_cookie(response)
         raise _invalid_refresh()
@@ -87,7 +110,9 @@ def refresh(response: Response, db: DbSession, refresh_token: RefreshCookie = No
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(response: Response, db: DbSession, refresh_token: RefreshCookie = None) -> None:
+def logout(
+    response: Response, db: DbSession, refresh_token: RefreshCookie = None
+) -> None:
     if refresh_token is not None:
         service.revoke_refresh_token(db, refresh_token)
     _clear_refresh_cookie(response)

@@ -1,6 +1,9 @@
+from contextlib import asynccontextmanager  # ← NAYA (1)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
+from messaging.connection import connect_rabbitmq, close_rabbitmq  # ← NAYA (1)
+
 
 from auth.routes import router as auth_router
 from config import settings
@@ -11,6 +14,16 @@ from errors import register_error_handlers
 # create_all never alters an existing table, so new columns would silently be missing.
 
 app = FastAPI(title="TicketRush auth-service")
+
+
+@asynccontextmanager  # ← NAYA (2)
+async def lifespan(app: FastAPI):
+    await connect_rabbitmq()  # subah: app start par connect
+    yield  # app chal raha hai, requests le raha hai
+    await close_rabbitmq()
+
+
+app = FastAPI(title="TicketRush auth-service", lifespan=lifespan)  # ← BADLA (3)
 
 # In dev the Vite proxy makes calls same-origin, so CORS is only needed when the
 # browser calls this service directly. allow_credentials lets the refresh cookie through.
